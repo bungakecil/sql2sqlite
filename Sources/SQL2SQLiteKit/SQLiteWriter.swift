@@ -251,11 +251,17 @@ public final class SQLiteWriter {
         return out
     }
 
-    /// Commits, restores a normal journal mode so the output is a clean single
-    /// file, and closes the handle.
-    public func finish() throws {
+    /// Commits and restores a normal journal mode so the output is a clean
+    /// single file. The handle stays open so callers can still query it.
+    public func finalizeWrites() throws {
         try commit()
         try exec("PRAGMA journal_mode=DELETE")
+    }
+
+    /// Finalizes and closes. Callers that still need to read the database
+    /// should call `finalizeWrites()` instead.
+    public func finish() throws {
+        try finalizeWrites()
         close()
     }
 
