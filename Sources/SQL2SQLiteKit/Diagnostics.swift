@@ -65,9 +65,12 @@ public final class Diagnostics {
         try warn(category, message, offset: offset, line: line)
     }
 
-    /// One-line end-of-run tally, or nil when nothing was skipped.
+    /// One-line end-of-run tally, or nil when nothing was skipped. Under --quiet
+    /// this reports only a count: naming the categories is exactly the detail
+    /// the caller asked to be spared.
     public func summaryFragment() -> String? {
         guard !counts.isEmpty else { return nil }
+        if quiet { return "\(total) warning\(total == 1 ? "" : "s")" }
         return counts
             .sorted { $0.key.rawValue < $1.key.rawValue }
             .map { "\($0.value) \($0.key.rawValue)" }
