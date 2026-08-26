@@ -144,26 +144,23 @@ private func translate(_ sql: String,
     #expect(rec.lines.contains { $0.contains("generated") })
 }
 
-// TASK11-RESTORE-BEGIN
-// @Test(.disabled("SQLiteWriter lands in Task 11"))
-// func theGeneratedDDLIsAcceptedBySQLite() throws {
-//     // The real acceptance test: hand it to SQLite and see if it parses.
-//     let t = try translate("""
-//     CREATE TABLE `everything` (
-//       `id` int unsigned NOT NULL AUTO_INCREMENT,
-//       `name` varchar(100) COLLATE utf8mb4_general_ci NOT NULL DEFAULT 'x',
-//       `kind` enum('a','b') DEFAULT 'a',
-//       `amount` decimal(10,2) DEFAULT '0.00',
-//       `blob` longblob,
-//       `created` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
-//       `parent` int unsigned DEFAULT NULL,
-//       PRIMARY KEY (`id`),
-//       KEY `k_parent` (`parent`),
-//       CONSTRAINT `fk_p` FOREIGN KEY (`parent`) REFERENCES `everything` (`id`) ON DELETE SET NULL
-//     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-//     """)
-//     let writer = try SQLiteWriter(path: ":memory:")
-//     try writer.exec(t.createSQL)
-//     for index in t.indexSQL { try writer.exec(index.sql) }
-// }
-// TASK11-RESTORE-END
+@Test func theGeneratedDDLIsAcceptedBySQLite() throws {
+    // The real acceptance test: hand it to SQLite and see if it parses.
+    let t = try translate("""
+    CREATE TABLE `everything` (
+      `id` int unsigned NOT NULL AUTO_INCREMENT,
+      `name` varchar(100) COLLATE utf8mb4_general_ci NOT NULL DEFAULT 'x',
+      `kind` enum('a','b') DEFAULT 'a',
+      `amount` decimal(10,2) DEFAULT '0.00',
+      `blob` longblob,
+      `created` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      `parent` int unsigned DEFAULT NULL,
+      PRIMARY KEY (`id`),
+      KEY `k_parent` (`parent`),
+      CONSTRAINT `fk_p` FOREIGN KEY (`parent`) REFERENCES `everything` (`id`) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """)
+    let writer = try SQLiteWriter(path: ":memory:")
+    try writer.exec(t.createSQL)
+    for index in t.indexSQL { try writer.exec(index.sql) }
+}
