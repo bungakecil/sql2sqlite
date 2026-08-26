@@ -1,0 +1,18 @@
+DROP TABLE IF EXISTS `numerics`;
+CREATE TABLE `numerics` (
+  `id` int NOT NULL,
+  `big_int` bigint unsigned DEFAULT NULL,
+  `wide_dec` decimal(30,4) DEFAULT NULL,
+  `small_dec` decimal(10,2) DEFAULT NULL,
+  `dbl` double DEFAULT NULL,
+  `flt` float DEFAULT NULL,
+  `sci` double DEFAULT NULL,
+  `bits` bit(8) DEFAULT NULL,
+  `flag` tinyint(1) DEFAULT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB;
+INSERT INTO `numerics` VALUES
+ (1,18446744073709551615,'123456789012345678901234.5678','1.50',3.141592653589793,1.5,1.5e3,b'10101010',1),
+ (2,0,'-99999.0001','-1.25',-2.5,-0.5,-1.5e-3,b'00000001',0),
+ (3,9223372036854775807,'0.0000','0.00',0,0,0,b'00000000',1),
+ (4,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL);

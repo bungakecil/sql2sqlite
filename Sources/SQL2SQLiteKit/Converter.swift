@@ -170,11 +170,17 @@ public final class Converter {
     }
 
     private func handleDropTable(_ name: String) throws {
-        try writer.exec("DROP TABLE IF EXISTS \(StringEscapes.quoteIdentifier(name))")
+        let quoted = StringEscapes.quoteIdentifier(name)
+        try writer.exec("DROP TABLE IF EXISTS \(quoted)")
+        // mysqldump writes a placeholder CREATE VIEW, then DROP VIEW, then the
+        // real definition. Dropping only the table would leave the placeholder
+        // queued, and the real definition would then fail as a duplicate.
+        try writer.exec("DROP VIEW IF EXISTS \(quoted)")
         tables[name] = nil
         // Without this the queued CREATE INDEX statements would fail at the end
         // of the run - which is exactly what mysqldump's view placeholders do.
         pendingIndexes.removeAll { $0.table == name }
+        pendingViews.removeAll { $0.name == name }
     }
 
     private func handleInsert(_ statement: Statement) throws {
