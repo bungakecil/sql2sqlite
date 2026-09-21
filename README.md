@@ -106,6 +106,7 @@ continues. `--strict` turns the first warning into a fatal error instead.
 - index prefix lengths (`KEY (name(10))` indexes the whole value)
 - collations other than `*_ci` (→ `NOCASE`) and `*_bin` (→ `BINARY`)
 - `ON UPDATE CURRENT_TIMESTAMP`
+- function column defaults with no SQLite equivalent (e.g. `uuid()`)
 - partitioning, users and grants
 - `LOAD DATA INFILE`, and `mysqldump --tab` / `--xml` output
 - MySQL-specific functions inside view or generated-column expressions, which
@@ -136,6 +137,16 @@ continues. `--strict` turns the first warning into a fatal error instead.
 - **Indexes are created after the data loads**, and views after that, in
   repeated passes so view-on-view dependencies resolve whatever order the dump
   declared them in.
+- **Function defaults collapse to SQLite bare keywords.** MySQL datetime functions
+  (`NOW()`, `CURRENT_TIMESTAMP(6)`, `CURDATE()`, `CURTIME()`) map to SQLite's
+  `CURRENT_TIMESTAMP`, `CURRENT_DATE`, and `CURRENT_TIME`, losing any sub-second
+  precision argument. Furthermore, SQLite evaluates `CURRENT_TIMESTAMP` in **UTC**,
+  whereas MySQL's `NOW()` uses the session time zone, so such a column may shift by
+  the server's offset; `UTC_TIMESTAMP()` maps identically. A `NOT NULL` column whose
+  function default was dropped (e.g. `DEFAULT uuid()`) still loads fine because dump
+  `INSERT`s supply every column, but subsequent inserts that omit the column will fail
+  the `NOT NULL` constraint. Complex compound expressions such as
+  `DEFAULT (now() + interval 1 day)` are not decomposed and remain passed through.
 
 ## Exit codes
 

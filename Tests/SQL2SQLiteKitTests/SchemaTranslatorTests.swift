@@ -144,6 +144,59 @@ private func translate(_ sql: String,
     #expect(rec.lines.contains { $0.contains("generated") })
 }
 
+@Test func functionDefaultsRenderAsBareKeywords() throws {
+    let t = try translate("""
+    CREATE TABLE t (
+      `a` timestamp DEFAULT current_timestamp(),
+      `b` timestamp DEFAULT now(),
+      `c` date DEFAULT curdate(),
+      `d` time DEFAULT curtime()
+    )
+    """)
+    #expect(t.createSQL.contains(#""a" TEXT DEFAULT CURRENT_TIMESTAMP"#))
+    #expect(t.createSQL.contains(#""b" TEXT DEFAULT CURRENT_TIMESTAMP"#))
+    #expect(t.createSQL.contains(#""c" TEXT DEFAULT CURRENT_DATE"#))
+    #expect(t.createSQL.contains(#""d" TEXT DEFAULT CURRENT_TIME"#))
+    #expect(t.createSQL.contains("()") == false)
+}
+
+@Test func stringDefaultsWithPunctuationSurviveVerbatim() throws {
+    let t = try translate("""
+    CREATE TABLE t (
+      `a` varchar(10) DEFAULT '(,)',
+      `b` varchar(10) DEFAULT 'now()'
+    )
+    """)
+    #expect(t.createSQL.contains(#""a" TEXT DEFAULT '(,)'"#))
+    #expect(t.createSQL.contains(#""b" TEXT DEFAULT 'now()'"#))
+}
+
+@Test func parenthesisedExpressionDefaultsPreserveParens() throws {
+    let t = try translate("CREATE TABLE t (`a` int DEFAULT (1+2))")
+    #expect(t.createSQL.contains(#""a" INTEGER DEFAULT (1+2)"#))
+}
+
+@Test func unsupportedFunctionDefaultsAreDroppedWithAWarning() throws {
+    final class Recorder { var lines: [String] = [] }
+    let rec = Recorder()
+    let d = Diagnostics(strict: false, quiet: false) { rec.lines.append($0) }
+    let t = try translate("""
+    CREATE TABLE t (
+      `u1` char(36) DEFAULT uuid(),
+      `u2` char(36) DEFAULT (uuid())
+    )
+    """, diagnostics: d)
+    #expect(t.createSQL.contains("DEFAULT") == false)
+    #expect(rec.lines.count == 2)
+    #expect(rec.lines.allSatisfy { $0.contains("uuid") && $0.contains("dropped attribute") })
+}
+
+@Test func unsupportedFunctionDefaultThrowsUnderStrict() {
+    #expect(throws: ConversionError.self) {
+        _ = try translate("CREATE TABLE t (`u` char(36) DEFAULT uuid())", diagnostics: .discarding(strict: true))
+    }
+}
+
 @Test func theGeneratedDDLIsAcceptedBySQLite() throws {
     // The real acceptance test: hand it to SQLite and see if it parses.
     let t = try translate("""
@@ -154,6 +207,9 @@ private func translate(_ sql: String,
       `amount` decimal(10,2) DEFAULT '0.00',
       `blob` longblob,
       `created` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      `updated` timestamp NOT NULL DEFAULT current_timestamp(6),
+      `snapshot_date` date DEFAULT (curdate()),
+      `tracking_id` char(36) DEFAULT (uuid()),
       `parent` int unsigned DEFAULT NULL,
       PRIMARY KEY (`id`),
       KEY `k_parent` (`parent`),

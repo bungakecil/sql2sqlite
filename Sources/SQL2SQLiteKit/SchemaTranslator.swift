@@ -109,7 +109,14 @@ public final class SchemaTranslator {
                 piece += " NOT NULL"
             }
             if let value = column.defaultSQL, column.generatedExpression == nil {
-                piece += " DEFAULT \(value)"
+                switch DefaultValueMapper.map(value) {
+                case .keep(let sql):
+                    piece += " DEFAULT \(sql)"
+                case .unsupported:
+                    try diagnostics.warn(.droppedAttribute,
+                        "dropped DEFAULT \(value) on `\(table.name)`.`\(column.name)`; SQLite has no equivalent function",
+                        offset: location.offset, line: location.line)
+                }
             }
             if let collation = column.collation,
                let mappedCollation = try mapCollation(collation, table: table.name,

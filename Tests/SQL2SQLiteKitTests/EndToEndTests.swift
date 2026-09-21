@@ -112,11 +112,36 @@ private func text(_ w: SQLiteWriter, _ sql: String) throws -> String? {
     }
 }
 
+@Test func mariaDBFixtureProducesAValidDatabase() throws {
+    final class Recorder { var lines: [String] = [] }
+    let rec = Recorder()
+    let d = Diagnostics(strict: false, quiet: false) { rec.lines.append($0) }
+    let (w, s) = try load("mariadb.sql", diagnostics: d)
+    #expect(s.tables == 1)
+    #expect(s.rows == 3)
+    #expect(try text(w, "PRAGMA integrity_check") == "ok")
+    #expect(rec.lines.contains { $0.contains("dropped attribute") && $0.contains("uuid") })
+    let sql = try text(w, "SELECT sql FROM sqlite_master WHERE name='events'") ?? ""
+    #expect(sql.contains(#""created_at" TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"#))
+    #expect(sql.contains(#""updated_at" TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"#))
+    #expect(sql.contains(#""event_date" TEXT DEFAULT CURRENT_DATE"#))
+    #expect(sql.contains(#""tracking_id" TEXT"#))
+    #expect(sql.contains("uuid") == false)
+    #expect(sql.contains("()") == false)
+}
+
+@Test func mariaDBFixtureFailsUnderStrict() throws {
+    #expect(throws: ConversionError.self) {
+        _ = try load("mariadb.sql", diagnostics: .discarding(strict: true))
+    }
+}
+
 // The whole reason ByteScanner exists: identical results at any chunk size.
 @Test(arguments: [1, 7, 64, 512, 1 << 16])
 func everyFixtureConvertsIdenticallyAtAnyChunkSize(chunkSize: Int) throws {
     for fixture in ["escapes.sql", "unicode.sql", "blobs.sql",
-                    "numerics.sql", "schema.sql", "chunkboundary.sql"] {
+                    "numerics.sql", "schema.sql", "chunkboundary.sql",
+                    "mariadb.sql"] {
         let (_, small) = try load(fixture, chunkSize: chunkSize)
         let (_, big) = try load(fixture, chunkSize: 1 << 16)
         #expect(small == big, "\(fixture) differed at chunkSize \(chunkSize)")
