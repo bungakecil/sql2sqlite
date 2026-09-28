@@ -58,10 +58,37 @@ extension String {
 
 /// A table the run has created, or discovered in the target under --data-only.
 private struct RegisteredTable {
+    /// Every column in declaration order, generated ones included, because a
+    /// dump's implicit INSERT may supply a value for each of them.
     var columns: [TranslatedColumn]
-    /// Generated columns cannot be written to, so they never take a bind slot.
-    var insertableColumns: [String]
+    /// Lowercased, since MySQL column names are case-insensitive.
+    var generated: Set<String>
     var affinities: [String: SQLiteAffinity]
+
+    func isGenerated(_ name: String) -> Bool { generated.contains(name.lowercased()) }
+
+    var writableCount: Int { columns.count - generated.count }
+}
+
+/// How one INSERT statement's tuples map onto bind slots. Generated columns
+/// cannot be written, so a value supplied for one is dropped and SQLite
+/// computes it instead.
+private struct InsertProjection {
+    var sourceCount: Int
+    var valueIndices: [Int]
+    var targetColumns: [String]
+    var affinities: [SQLiteAffinity]
+
+    init(sourceColumns: [String], table: RegisteredTable) {
+        sourceCount = sourceColumns.count
+        valueIndices = sourceColumns.indices.filter { !table.isGenerated(sourceColumns[$0]) }
+        targetColumns = valueIndices.map { sourceColumns[$0] }
+        affinities = targetColumns.map { table.affinities[$0] ?? .text }
+    }
+
+    func project(_ row: [RawValue]) -> [RawValue] {
+        valueIndices.map { row[$0] }
+    }
 }
 
 public final class Converter {
@@ -155,13 +182,11 @@ public final class Converter {
             parsed, location: (statement.byteOffset, statement.line))
         try writer.exec(translated.createSQL)
 
-        let generated = Set(parsed.columns.filter { $0.generatedExpression != nil }.map(\.name))
+        let generated = Set(parsed.columns.filter { $0.generatedExpression != nil }.map { $0.name.lowercased() })
         var affinities: [String: SQLiteAffinity] = [:]
         for column in translated.columns { affinities[column.name] = column.affinity }
         tables[parsed.name] = RegisteredTable(
-            columns: translated.columns,
-            insertableColumns: translated.columns.map(\.name).filter { !generated.contains($0) },
-            affinities: affinities)
+            columns: translated.columns, generated: generated, affinities: affinities)
 
         for index in translated.indexSQL {
             pendingIndexes.append((table: parsed.name, index: index))
@@ -187,19 +212,21 @@ public final class Converter {
         var parser = try InsertParser(statement: statement, diagnostics: diagnostics)
         let registered = try registeredTable(named: parser.table, statement: statement)
 
-        let targetColumns = parser.columns ?? registered.insertableColumns
-        let affinities = targetColumns.map { registered.affinities[$0] ?? .text }
+        // An explicit list fixes the layout up front; without one the first
+        // tuple's width picks between every column and writable columns only.
+        var projection = parser.columns.map { InsertProjection(sourceColumns: $0, table: registered) }
 
         try beginBatch()
         while let row = try parser.nextRow() {
-            guard row.count == targetColumns.count else {
-                throw ConversionError.parse(
-                    message: "INSERT INTO `\(parser.table)` supplies \(row.count) values "
-                        + "for \(targetColumns.count) columns",
-                    byteOffset: statement.byteOffset, line: statement.line)
+            let active = try projection ?? implicitProjection(
+                width: row.count, table: registered, name: parser.table, statement: statement)
+            projection = active
+            guard row.count == active.sourceCount else {
+                throw widthError(row.count, expected: "\(active.sourceCount) columns",
+                                 table: parser.table, statement: statement)
             }
-            try writer.insertRow(table: parser.table, columns: targetColumns,
-                                 affinities: affinities, values: row)
+            try writer.insertRow(table: parser.table, columns: active.targetColumns,
+                                 affinities: active.affinities, values: active.project(row))
             summary.rows += 1
             rowsInBatch += 1
             if rowsInBatch >= options.batchSize {
@@ -207,6 +234,27 @@ public final class Converter {
                 try beginBatch()
             }
         }
+    }
+
+    private func implicitProjection(width: Int, table: RegisteredTable, name: String,
+                                    statement: Statement) throws -> InsertProjection {
+        let all = table.columns.map(\.name)
+        if width == all.count {
+            return InsertProjection(sourceColumns: all, table: table)
+        }
+        if width == table.writableCount {
+            return InsertProjection(sourceColumns: all.filter { !table.isGenerated($0) }, table: table)
+        }
+        let expected = table.generated.isEmpty
+            ? "\(all.count) columns"
+            : "\(all.count) columns (or \(table.writableCount) writable columns)"
+        throw widthError(width, expected: expected, table: name, statement: statement)
+    }
+
+    private func widthError(_ supplied: Int, expected: String, table: String,
+                            statement: Statement) -> ConversionError {
+        .parse(message: "INSERT INTO `\(table)` supplies \(supplied) values for \(expected)",
+               byteOffset: statement.byteOffset, line: statement.line)
     }
 
     /// Under --data-only the target tables already exist, so their shape comes
@@ -218,7 +266,7 @@ public final class Converter {
             throw ConversionError.schema(
                 "INSERT INTO `\(name)` at line \(statement.line) has no matching CREATE TABLE")
         }
-        let info = try writer.tableInfo(name)
+        let info = try writer.insertColumnInfo(name)
         guard !info.isEmpty else {
             throw ConversionError.schema(
                 "INSERT INTO `\(name)` at line \(statement.line) but no such table exists")
@@ -230,15 +278,16 @@ public final class Converter {
             affinities[column.name] = affinity
             columns.append(TranslatedColumn(name: column.name, affinity: affinity))
         }
-        let registered = RegisteredTable(columns: columns,
-                                          insertableColumns: info.map(\.name),
-                                          affinities: affinities)
+        let registered = RegisteredTable(
+            columns: columns,
+            generated: Set(info.filter { !$0.isWritable }.map { $0.name.lowercased() }),
+            affinities: affinities)
         tables[name] = registered
         return registered
     }
 
     /// SQLite's own affinity rules, applied to a declared type read back from
-    /// PRAGMA table_info.
+    /// PRAGMA table_xinfo.
     private static func affinity(forDeclaredType declared: String) -> SQLiteAffinity {
         let upper = declared.uppercased()
         if upper.contains("INT") { return .integer }

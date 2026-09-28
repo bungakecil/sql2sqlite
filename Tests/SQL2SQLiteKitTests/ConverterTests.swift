@@ -190,3 +190,150 @@ private func num(_ s: String) -> RawValue { .number(Array(s.utf8)) }
         _ = try convert("CREATE TABLE t (a GEOMETRY);", diagnostics: .discarding(strict: true))
     }
 }
+
+// MARK: - Generated columns
+
+private func parseError(_ body: () throws -> Void) -> (message: String, byteOffset: Int, line: Int)? {
+    do { try body() } catch ConversionError.parse(let m, let off, let line) {
+        return (m, off, line)
+    } catch { return nil }
+    return nil
+}
+
+@Test func fullWidthTuplesDropTheSuppliedGeneratedValue() throws {
+    let (w, s) = try convert("""
+    CREATE TABLE t (`a` int, `g` int GENERATED ALWAYS AS (`a`+1) STORED, `z` int);
+    INSERT INTO t VALUES (1,999,9);
+    """)
+    #expect(s.rows == 1)
+    #expect(try w.queryRow("SELECT a, g, z FROM t") == [num("1"), num("2"), num("9")])
+}
+
+@Test(arguments: ["STORED", "VIRTUAL"])
+func generatedColumnsAtEveryPositionDoNotShiftLaterValues(kind: String) throws {
+    let (w, s) = try convert("""
+    CREATE TABLE lead (`g` int GENERATED ALWAYS AS (`a`*10) \(kind), `a` int, `b` varchar(5));
+    CREATE TABLE mid (`a` int, `g` int GENERATED ALWAYS AS (`a`*10) \(kind), `b` varchar(5));
+    CREATE TABLE tail (`a` int, `b` varchar(5), `g` int GENERATED ALWAYS AS (`a`*10) \(kind));
+    INSERT INTO lead VALUES (0,1,'x'),(0,2,'y');
+    INSERT INTO mid VALUES (1,0,'x'),(2,0,'y');
+    INSERT INTO tail VALUES (1,'x',0),(2,'y',0);
+    """)
+    #expect(s.rows == 6)
+    for table in ["lead", "mid", "tail"] {
+        #expect(try w.queryRow("SELECT a, b, g FROM \(table) WHERE a = 1") == [num("1"), txt("x"), num("10")])
+        #expect(try w.queryRow("SELECT a, b, g FROM \(table) WHERE a = 2") == [num("2"), txt("y"), num("20")])
+    }
+}
+
+@Test func multipleGeneratedColumnsOfBothKinds() throws {
+    let (w, _) = try convert("""
+    CREATE TABLE t (`a` int, `s` int GENERATED ALWAYS AS (`a`+1) STORED, `b` int,
+                    `v` int AS (`b`*2) VIRTUAL, `c` int);
+    INSERT INTO t VALUES (1,0,2,0,3);
+    INSERT INTO t VALUES (4,5,6);
+    """)
+    #expect(try w.queryRow("SELECT a, s, b, v, c FROM t WHERE a = 1")
+            == [num("1"), num("2"), num("2"), num("4"), num("3")])
+    #expect(try w.queryRow("SELECT a, s, b, v, c FROM t WHERE a = 4")
+            == [num("4"), num("5"), num("5"), num("10"), num("6")])
+}
+
+@Test func writableOnlyImplicitTuplesStillWork() throws {
+    let (w, s) = try convert("""
+    CREATE TABLE t (`a` int, `g` int GENERATED ALWAYS AS (`a`+1) STORED, `z` int);
+    INSERT INTO t VALUES (1,9),(2,8);
+    """)
+    #expect(s.rows == 2)
+    #expect(try w.queryRow("SELECT a, g, z FROM t WHERE a = 2") == [num("2"), num("3"), num("8")])
+}
+
+@Test func explicitReorderedListsKeepPositionalMeaning() throws {
+    let (w, _) = try convert("""
+    CREATE TABLE t (`a` int, `g` int GENERATED ALWAYS AS (`a`+1) STORED, `z` varchar(5));
+    INSERT INTO t (`z`,`g`,`a`) VALUES ('x',999,1),('y',999,2);
+    INSERT INTO t (`g`,`z`,`a`) VALUES (999,'w',3);
+    """)
+    #expect(try w.queryRow("SELECT a, g, z FROM t WHERE a = 1") == [num("1"), num("2"), txt("x")])
+    #expect(try w.queryRow("SELECT a, g, z FROM t WHERE a = 2") == [num("2"), num("3"), txt("y")])
+    #expect(try w.queryRow("SELECT a, g, z FROM t WHERE a = 3") == [num("3"), num("4"), txt("w")])
+}
+
+@Test func explicitGeneratedOnlyListsInsertDefaults() throws {
+    let (w, s) = try convert("""
+    CREATE TABLE t (`a` int DEFAULT 7, `g` int GENERATED ALWAYS AS (`a`+1) STORED);
+    INSERT INTO t (`g`) VALUES (999),(998);
+    """)
+    #expect(s.rows == 2)
+    #expect(try w.queryRow("SELECT COUNT(*), MIN(a), MAX(g) FROM t") == [num("2"), num("7"), num("8")])
+}
+
+@Test func unknownExplicitColumnsStillFailInSQLite() {
+    #expect(throws: ConversionError.self) {
+        _ = try convert("""
+        CREATE TABLE t (`a` int, `g` int GENERATED ALWAYS AS (`a`+1) STORED);
+        INSERT INTO t (`a`,`nope`) VALUES (1,2);
+        """)
+    }
+}
+
+private func dataOnlyConvert(_ sql: String) throws -> (SQLiteWriter, ConversionSummary) {
+    let writer = try SQLiteWriter(path: ":memory:")
+    try writer.exec(#"""
+    CREATE TABLE "t" ("a" INTEGER, "g" INTEGER GENERATED ALWAYS AS ("a" + 1) STORED,
+                      "v" INTEGER GENERATED ALWAYS AS ("a" * 3) VIRTUAL, "z" TEXT)
+    """#)
+    var o = ConverterOptions(); o.dataOnly = true
+    let converter = Converter(writer: writer, diagnostics: .discarding(), options: o)
+    let s = try converter.run(source: ArrayByteSource(Array(sql.utf8)))
+    return (writer, s)
+}
+
+@Test func dataOnlyAcceptsFullWidthTuplesForExistingGeneratedColumns() throws {
+    let (w, s) = try dataOnlyConvert("INSERT INTO t VALUES (1,0,0,'x'),(2,0,0,'y');")
+    #expect(s.rows == 2)
+    #expect(try w.queryRow("SELECT a, g, v, z FROM t WHERE a = 2") == [num("2"), num("3"), num("6"), txt("y")])
+}
+
+@Test func dataOnlyAcceptsWritableOnlyTuplesForExistingGeneratedColumns() throws {
+    let (w, s) = try dataOnlyConvert("INSERT INTO t VALUES (1,'x'); INSERT INTO t (`g`,`z`,`a`) VALUES (0,'q',5);")
+    #expect(s.rows == 2)
+    #expect(try w.queryRow("SELECT a, g, v, z FROM t WHERE a = 1") == [num("1"), num("2"), num("3"), txt("x")])
+    #expect(try w.queryRow("SELECT a, g, v, z FROM t WHERE a = 5") == [num("5"), num("6"), num("15"), txt("q")])
+}
+
+private let generatedTable = "CREATE TABLE t (`a` int, `g` int GENERATED ALWAYS AS (`a`+1) STORED, `z` int);\n"
+
+@Test(arguments: [
+    ("INSERT INTO t VALUES (1);", "supplies 1 values"),
+    ("INSERT INTO t VALUES (1,2,3,4);", "supplies 4 values"),
+    ("INSERT INTO t VALUES (1,2,3),(1,2);", "supplies 2 values"),
+    ("INSERT INTO t VALUES (1,2),(1,2,3);", "supplies 3 values"),
+    ("INSERT INTO t (`a`,`g`) VALUES (1,2),(3);", "supplies 1 values"),
+])
+func malformedTupleWidthsAreParseErrors(insert: String, fragment: String) throws {
+    let sql = generatedTable + insert
+    let error = try #require(parseError { _ = try convert(sql) })
+    #expect(error.message.contains("`t`"))
+    #expect(error.message.contains(fragment))
+    #expect(error.line == 2)
+    #expect(error.byteOffset == generatedTable.utf8.count)
+}
+
+@Test func implicitWidthErrorsNameBothAcceptedLayouts() throws {
+    let error = try #require(parseError { _ = try convert(generatedTable + "INSERT INTO t VALUES (1);") })
+    #expect(error.message.contains("3 columns"))
+    #expect(error.message.contains("2 writable"))
+}
+
+@Test func malformedLaterTuplesAreNeverPaddedOrTruncated() throws {
+    let writer = try SQLiteWriter(path: ":memory:")
+    let converter = Converter(writer: writer, diagnostics: .discarding(), options: ConverterOptions())
+    #expect(throws: ConversionError.self) {
+        _ = try converter.run(source: ArrayByteSource(Array(
+            (generatedTable + "INSERT INTO t VALUES (1,0,2),(3,4);").utf8)))
+    }
+    // The first tuple went in before the second was found malformed; nothing
+    // was padded or truncated into a row.
+    #expect(try writer.queryRow("SELECT COUNT(*) FROM t WHERE z IS NULL")?[0] == num("0"))
+}
