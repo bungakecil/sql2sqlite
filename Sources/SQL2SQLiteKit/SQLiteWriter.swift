@@ -29,6 +29,14 @@ public struct ColumnInfo: Equatable {
     }
 }
 
+/// A column as an INSERT sees it: generated columns keep their position in the
+/// table but cannot be written to.
+struct InsertColumnInfo: Equatable {
+    var name: String
+    var declaredType: String
+    var isWritable: Bool
+}
+
 public final class SQLiteWriter {
     private var db: OpaquePointer?
     /// Keyed by table plus its column list, so an extended INSERT of 10 000 rows
@@ -93,9 +101,15 @@ public final class SQLiteWriter {
         let key = StringEscapes.quoteIdentifier(table) + "(" + columns.joined(separator: "\u{1}") + ")"
         if let cached = insertStatements[key] { return cached }
 
-        let quotedColumns = columns.map(StringEscapes.quoteIdentifier).joined(separator: ", ")
-        let placeholders = Array(repeating: "?", count: columns.count).joined(separator: ", ")
-        let sql = "INSERT INTO \(StringEscapes.quoteIdentifier(table)) (\(quotedColumns)) VALUES (\(placeholders))"
+        let sql: String
+        if columns.isEmpty {
+            // `INSERT INTO t () VALUES ()` is MySQL-only syntax.
+            sql = "INSERT INTO \(StringEscapes.quoteIdentifier(table)) DEFAULT VALUES"
+        } else {
+            let quotedColumns = columns.map(StringEscapes.quoteIdentifier).joined(separator: ", ")
+            let placeholders = Array(repeating: "?", count: columns.count).joined(separator: ", ")
+            sql = "INSERT INTO \(StringEscapes.quoteIdentifier(table)) (\(quotedColumns)) VALUES (\(placeholders))"
+        }
 
         guard let db else { throw ConversionError.sqlite(message: "database is closed", sql: sql) }
         var stmt: OpaquePointer?
@@ -143,13 +157,19 @@ public final class SQLiteWriter {
 
     public func insertRow(table: String, columns: [String],
                           affinities: [SQLiteAffinity], values: [RawValue]) throws {
+        // A short value list would otherwise leave trailing parameters bound
+        // to NULL, silently.
+        guard values.count == columns.count, affinities.count == columns.count else {
+            throw ConversionError.schema(
+                "INSERT INTO `\(table)` has \(columns.count) columns, \(affinities.count) affinities "
+                + "and \(values.count) values")
+        }
         let stmt = try prepared(table: table, columns: columns)
         sqlite3_reset(stmt)
         sqlite3_clear_bindings(stmt)
 
         for (n, value) in values.enumerated() {
-            let affinity = n < affinities.count ? affinities[n] : .text
-            let rc = bind(stmt, Int32(n + 1), value, affinity: affinity)
+            let rc = bind(stmt, Int32(n + 1), value, affinity: affinities[n])
             if rc != SQLITE_OK {
                 throw ConversionError.sqlite(message: errorMessage(),
                                              sql: "INSERT INTO \(table)")
@@ -172,6 +192,23 @@ public final class SQLiteWriter {
             let name = String(cString: sqlite3_column_text(stmt, 1))
             let declared = sqlite3_column_text(stmt, 2).map { String(cString: $0) } ?? ""
             out.append(ColumnInfo(name: name, declaredType: declared))
+        }
+        return out
+    }
+
+    /// Every column in declaration order, generated ones included. The hidden
+    /// flag from table_xinfo is 0 for an ordinary column, 1 for a virtual
+    /// table's hidden column (skipped), and 2 or 3 for VIRTUAL or STORED
+    /// generated columns.
+    func insertColumnInfo(_ table: String) throws -> [InsertColumnInfo] {
+        let sql = "PRAGMA table_xinfo(\(StringEscapes.quoteIdentifier(table)))"
+        var out: [InsertColumnInfo] = []
+        try forEachRow(sql) { stmt in
+            let hidden = sqlite3_column_int(stmt, 6)
+            guard hidden != 1 else { return }
+            let name = String(cString: sqlite3_column_text(stmt, 1))
+            let declared = sqlite3_column_text(stmt, 2).map { String(cString: $0) } ?? ""
+            out.append(InsertColumnInfo(name: name, declaredType: declared, isWritable: hidden == 0))
         }
         return out
     }

@@ -116,3 +116,57 @@ private func writer() throws -> SQLiteWriter { try SQLiteWriter(path: ":memory:"
     #expect(try reopened.queryRow("SELECT a FROM t")?[0] == .number(Array("7".utf8)))
     #expect(try reopened.queryRow("PRAGMA integrity_check")?[0] == .text(Array("ok".utf8)))
 }
+
+@Test func insertColumnInfoKeepsGeneratedColumnsInOrderAndMarksThemNonwritable() throws {
+    let w = try writer()
+    try w.exec("""
+    CREATE TABLE t ("a" INTEGER, "s" INTEGER GENERATED ALWAYS AS (a + 1) STORED,
+                    "b" TEXT, "v" INTEGER GENERATED ALWAYS AS (a * 2) VIRTUAL, "c" REAL)
+    """)
+    #expect(try w.insertColumnInfo("t") == [
+        InsertColumnInfo(name: "a", declaredType: "INTEGER", isWritable: true),
+        InsertColumnInfo(name: "s", declaredType: "INTEGER", isWritable: false),
+        InsertColumnInfo(name: "b", declaredType: "TEXT", isWritable: true),
+        InsertColumnInfo(name: "v", declaredType: "INTEGER", isWritable: false),
+        InsertColumnInfo(name: "c", declaredType: "REAL", isWritable: true),
+    ])
+    // The public view is unchanged: table_info omits generated columns.
+    #expect(try w.tableInfo("t").map(\.name) == ["a", "b", "c"])
+}
+
+@Test func insertRowRejectsFewerValuesThanColumnsWithoutInserting() throws {
+    let w = try writer()
+    try w.exec(#"CREATE TABLE t ("a" INTEGER, "b" INTEGER)"#)
+    #expect(throws: ConversionError.self) {
+        try w.insertRow(table: "t", columns: ["a", "b"], affinities: [.integer, .integer],
+                        values: [.number(Array("1".utf8))])
+    }
+    #expect(try w.queryRow("SELECT COUNT(*) FROM t")?[0] == .number(Array("0".utf8)))
+}
+
+@Test func insertRowRejectsMoreValuesThanColumnsWithoutInserting() throws {
+    let w = try writer()
+    try w.exec(#"CREATE TABLE t ("a" INTEGER, "b" INTEGER)"#)
+    #expect(throws: ConversionError.self) {
+        try w.insertRow(table: "t", columns: ["a"], affinities: [.integer],
+                        values: [.number(Array("1".utf8)), .number(Array("2".utf8))])
+    }
+    #expect(try w.queryRow("SELECT COUNT(*) FROM t")?[0] == .number(Array("0".utf8)))
+}
+
+@Test func insertRowRejectsAnAffinityCountMismatchWithoutInserting() throws {
+    let w = try writer()
+    try w.exec(#"CREATE TABLE t ("a" INTEGER, "b" INTEGER)"#)
+    #expect(throws: ConversionError.self) {
+        try w.insertRow(table: "t", columns: ["a", "b"], affinities: [.integer],
+                        values: [.number(Array("1".utf8)), .number(Array("2".utf8))])
+    }
+    #expect(try w.queryRow("SELECT COUNT(*) FROM t")?[0] == .number(Array("0".utf8)))
+}
+
+@Test func insertRowWithNoColumnsInsertsDefaults() throws {
+    let w = try writer()
+    try w.exec(#"CREATE TABLE t ("a" INTEGER DEFAULT 7, "g" INTEGER GENERATED ALWAYS AS (a + 1))"#)
+    try w.insertRow(table: "t", columns: [], affinities: [], values: [])
+    #expect(try w.queryRow("SELECT a, g FROM t") == [.number(Array("7".utf8)), .number(Array("8".utf8))])
+}
