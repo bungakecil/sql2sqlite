@@ -134,6 +134,15 @@ continues. `--strict` turns the first warning into a fatal error instead.
   becomes `posts_idx_name`; remaining collisions get a `_2`, `_3` suffix.
 - **`AUTO_INCREMENT` becomes `AUTOINCREMENT` only on a lone INTEGER PRIMARY
   KEY**, the one shape SQLite permits. Anything else drops it with a warning.
+- **Generated columns are recomputed, not copied.** `STORED` and `VIRTUAL`
+  columns keep their expression, and SQLite computes their values, so any value
+  the dump supplies for a generated column is discarded. An `INSERT` without a
+  column list may supply either every column in table order, generated ones
+  included (what mysqldump writes), or only the writable columns. The first
+  tuple's width picks the layout, and every later tuple in that statement must
+  match it; any other width is an error, never padded or truncated. An explicit
+  column list keeps its positions, and entries naming generated columns are
+  skipped.
 - **Indexes are created after the data loads**, and views after that, in
   repeated passes so view-on-view dependencies resolve whatever order the dump
   declared them in.

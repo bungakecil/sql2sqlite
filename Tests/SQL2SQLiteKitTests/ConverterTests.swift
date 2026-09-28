@@ -337,3 +337,43 @@ func malformedTupleWidthsAreParseErrors(insert: String, fragment: String) throws
     // was padded or truncated into a row.
     #expect(try writer.queryRow("SELECT COUNT(*) FROM t WHERE z IS NULL")?[0] == num("0"))
 }
+
+@Test func softDeleteActiveSlugIsRecomputedAndStaysUnique() throws {
+    let (w, s) = try convert("""
+    CREATE TABLE `categories` (
+      `id` char(36) NOT NULL,
+      `slug` varchar(255) NOT NULL,
+      `deleted_at` timestamp NULL DEFAULT NULL,
+      `active_slug` varchar(255) GENERATED ALWAYS AS (case when `deleted_at` is null then `slug` else NULL end) STORED,
+      PRIMARY KEY (`id`),
+      UNIQUE KEY `categories_active_slug_unique` (`active_slug`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    INSERT INTO `categories` VALUES ('c1','tours',NULL,'tours'),
+      ('c2','tours','2026-01-01 00:00:00',NULL),
+      ('c3','cruises','2026-02-01 00:00:00',NULL),
+      ('c4','cruises',NULL,'cruises'),
+      ('c5','walks',NULL,'bogus');
+    """)
+    #expect(s.rows == 5 && s.indexes == 1)
+    #expect(try w.queryRow("SELECT COUNT(*) FROM categories")?[0] == num("5"))
+    #expect(try w.queryRow("""
+        SELECT COUNT(*) FROM categories
+        WHERE active_slug IS NOT (CASE WHEN deleted_at IS NULL THEN slug ELSE NULL END)
+        """)?[0] == num("0"))
+    #expect(try w.queryRow("SELECT active_slug FROM categories WHERE id = 'c5'")?[0] == txt("walks"))
+    #expect(try w.queryRow("""
+        SELECT COUNT(*) FROM pragma_index_list('categories') AS l,
+                             pragma_index_info(l.name) AS i
+        WHERE l."unique" = 1 AND l.origin = 'c' AND i.name = 'active_slug'
+        """)?[0] == num("1"))
+    #expect(try w.queryRow("PRAGMA integrity_check")?[0] == txt("ok"))
+
+    try w.exec("UPDATE categories SET deleted_at = '2026-03-01 00:00:00' WHERE id = 'c1'")
+    #expect(try w.queryRow("SELECT active_slug FROM categories WHERE id = 'c1'")?[0] == .null)
+    try w.exec("UPDATE categories SET deleted_at = NULL WHERE id = 'c2'")
+    #expect(try w.queryRow("SELECT active_slug FROM categories WHERE id = 'c2'")?[0] == txt("tours"))
+    // The unique index still guards the recomputed values.
+    #expect(throws: ConversionError.self) {
+        try w.exec("UPDATE categories SET deleted_at = NULL WHERE id = 'c3'")
+    }
+}
